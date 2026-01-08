@@ -1,0 +1,11 @@
+.group-icon {
+    font-weight: 700;
+}
+
+.group-icon.expanded {
+    color: #2e7d32;
+}
+
+.group-icon.contracted {
+    color: #087f23;
+}

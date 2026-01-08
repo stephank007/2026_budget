@@ -1,0 +1,29 @@
+{
+  "amount_rules": [
+    {
+      "description": "דיור משתלה",
+      "approx_amount": -6000,
+      "tolerance": 0,
+      "new_payee": "דיור משתלה"
+    },
+    {
+      "description": "הלוואת רכב",
+      "approx_amount": -1930,
+      "tolerance": 50,
+      "new_payee": "הלוואת רכב"
+    },
+    {
+      "description": "Social Security",
+      "approx_amount": 9896,
+      "tolerance": 500,
+      "new_payee": "Social Security"
+    }
+  ],
+  "extract_payees": [
+    "Social Security",
+    "מגדל חברה לביטוח בעי",
+    "ביטוח לאומי-אזרח ותי",
+    "כלל חברה לביטוח בעי",
+    "אברא טכנולוגיות מידי"
+  ]
+}
