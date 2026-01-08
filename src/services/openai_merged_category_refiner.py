@@ -159,37 +159,24 @@ def rule_based_guess(
     """
     1. Exact payee → category from lookup.
     2. Substring rule (match_string) → normalized_payee → lookup.
-
-    Notes:
-      - Case-insensitive + whitespace-safe.
-      - Skips empty/NaN match_string safely.
     """
     if not isinstance(payee, str):
         return None
-    payee_s = payee.strip()
-    if not payee_s:
+    payee = payee.strip()
+    if not payee:
         return None
     
-    # 1) exact lookup (keep original exact semantics first)
-    if payee_s in payee_to_cat:
-        return payee_to_cat[payee_s]
+    # 1) exact lookup
+    if payee in payee_to_cat:
+        return payee_to_cat[payee]
     
-    # 2) case-insensitive substring rule → normalized_payee → lookup
-    payee_l = payee_s.lower()
+    # 2) substring rule → normalized_payee → lookup
     for rule in rules:
-        mstr = rule.get("match_string")
-        if mstr is None or (isinstance(mstr, float) and pd.isna(mstr)):
-            continue
-        ms = str(mstr).strip().lower()
-        if not ms:
-            continue
-        if ms in payee_l:
+        m = rule.get("match_string")
+        if m and m in payee:
             normalized = rule.get("normalized_payee")
-            if normalized is None or (isinstance(normalized, float) and pd.isna(normalized)):
-                continue
-            norm_s = str(normalized).strip()
-            if norm_s in payee_to_cat:
-                return payee_to_cat[norm_s]
+            if normalized in payee_to_cat:
+                return payee_to_cat[normalized]
     
     return None
 
@@ -530,3 +517,169 @@ def refine_merged_categories(
     
     wb.save(xlsx_path)
     print(f"[refiner] updated '{sheet_name}' in {xlsx_path}")
+
+
+# -----------------------------------------------------------------------------
+# New entry point: refine_workbook_categories
+# -----------------------------------------------------------------------------
+def refine_workbook_categories(
+    xlsx_path: Any,
+    *,
+    sheet_name: Optional[str] = None,
+    payee_col: Optional[str] = None,
+    category_col: str = "category",
+    payee_col_candidates: Tuple[str, ...] = ("bank_normal", "payee"),
+) -> None:
+    """Refine categories on the *first sheet only* (by default) for any workbook.
+
+    Why this exists:
+      - bank-fixer writes DATA_PROCESSED/9016_mm_yy.xlsx with first sheet 'Parsed'
+        and payee column usually 'bank_normal'.
+      - merge_statements writes DATA_PROCESSED/merged_one_sheet.xlsx with first
+        (only) sheet 'Merged' and payee column usually 'payee'.
+
+    This function chooses the sheet and payee column conservatively:
+      - If sheet_name is None, uses the workbook's first sheet.
+      - If payee_col is None, tries payee_col_candidates in order.
+
+    It keeps the same behavior as refine_merged_categories(): fills only unknown
+    categories and writes updates with openpyxl to preserve formatting.
+    """
+    
+    # Normalize to pathlib.Path (accepts str / PathLike)
+    from pathlib import Path as _Path
+    path = _Path(str(xlsx_path))
+    
+    if not path.exists():
+        print(f"[refiner] file not found: {path}")
+        return
+    
+    # Decide sheet: first sheet unless explicitly provided
+    wb = load_workbook(path)
+    if not wb.sheetnames:
+        print(f"[refiner] workbook has no sheets: {path}")
+        return
+    
+    target_sheet = sheet_name or wb.sheetnames[0]
+    if target_sheet not in wb.sheetnames:
+        print(f"[refiner] sheet '{target_sheet}' not found in {path}")
+        return
+    
+    # Read with pandas for mask logic
+    print(f"[refiner] loading (pandas view): {path} (sheet='{target_sheet}')")
+    try:
+        df = pd.read_excel(path, sheet_name=target_sheet)
+    except Exception as e:
+        print(f"[refiner] failed to read sheet '{target_sheet}' in {path}: {e}")
+        return
+    
+    # Decide payee column
+    chosen_payee_col = payee_col
+    if chosen_payee_col is None:
+        for c in payee_col_candidates:
+            if c in df.columns:
+                chosen_payee_col = c
+                break
+    
+    if chosen_payee_col is None:
+        print(
+            f"[refiner] none of payee columns {payee_col_candidates} found in sheet '{target_sheet}'. "
+            f"Available columns: {list(df.columns)}"
+        )
+        return
+    
+    if category_col not in df.columns:
+        print(
+            f"[refiner] expected category column '{category_col}' not found in sheet '{target_sheet}'. "
+            f"Available columns: {list(df.columns)}"
+        )
+        return
+    
+    # build lookup dicts using existing service
+    payee_to_cat, rules, allowed_categories, _ = build_lookup_dicts()
+    
+    cat = df[category_col]
+    unknown_mask = (
+            cat.isna()
+            | (cat == False)  # noqa: E712 - we intentionally compare to False
+            | (cat.astype(str).str.strip() == "לא מזוהה")
+    )
+    
+    unknown_df = df.loc[unknown_mask].copy()
+    unknown_payees = unknown_df[payee_col].to_list()
+    print(f"[refiner] rows with unknown category: {unknown_payees}")
+    
+    unique_payees = (
+        unknown_df[chosen_payee_col]
+        .dropna()
+        .astype(str)
+        .str.strip()
+        .unique()
+        .tolist()
+    )
+    
+    payee_to_new_cat: Dict[str, str] = {}
+    payee_to_method: Dict[str, str] = {}
+    
+    for p in unique_payees:
+        if looks_like_garbage(p):
+            continue
+        
+        guess = rule_based_guess(p, rules, payee_to_cat)
+        if guess:
+            payee_to_new_cat[p] = guess
+            payee_to_method[p] = "rule"
+            continue
+        
+        guess = fuzzy_guess(p, payee_to_cat)
+        if guess:
+            payee_to_new_cat[p] = guess
+            payee_to_method[p] = "fuzzy"
+            continue
+        
+        guess = heuristic_keyword_guess(p, allowed_categories)
+        if guess:
+            payee_to_new_cat[p] = guess
+            payee_to_method[p] = "heuristic"
+            continue
+        
+        guess = llm_guess_category(p, allowed_categories)
+        if guess:
+            print(f"[refiner] using openai LLM for: {p}")
+            payee_to_new_cat[p] = guess
+            payee_to_method[p] = "llm"
+    
+    print(f"[refiner] guessed categories for {len(payee_to_new_cat)} unique payees")
+    if not payee_to_new_cat:
+        print("[refiner] nothing to update")
+        return
+    
+    ws = wb[target_sheet]
+    
+    try:
+        category_col_idx = _find_header_col(ws, category_col)
+        payee_col_idx = _find_header_col(ws, chosen_payee_col)
+    except ValueError as e:
+        print(f"[refiner] {e}")
+        return
+    
+    source_col_name = "category_source"
+    source_col_idx = _get_or_create_header_col(ws, source_col_name)
+    
+    first_data_row = 2
+    for df_idx in df.index[unknown_mask]:
+        payee_val = df.at[df_idx, chosen_payee_col]
+        payee_val = str(payee_val).strip()
+        new_cat = payee_to_new_cat.get(payee_val)
+        if not new_cat:
+            continue
+        
+        excel_row = first_data_row + int(df_idx)
+        ws.cell(row=excel_row, column=category_col_idx).value = new_cat
+        
+        method = payee_to_method.get(payee_val)
+        if method:
+            ws.cell(row=excel_row, column=source_col_idx).value = method
+    
+    wb.save(path)
+    print(f"[refiner] updated '{target_sheet}' in {path}")

@@ -1,4 +1,3 @@
-from pathlib import Path
 from typing import List
 import warnings
 
@@ -10,6 +9,7 @@ from services.payee_service import (
     load_payee_resources,
     apply_payee_rules_and_categories,
 )
+from openai_merged_category_refiner import refine_workbook_categories
 from utils import (
     FIXED_RATES_TO_ILS,
     FOUR_DIGITS_PREFIX,
@@ -32,6 +32,7 @@ warnings.filterwarnings(
     message="Could not infer format, so each element will be parsed individually, falling back to `dateutil`.",
 )
 
+
 # Build a dedupe key:
 def norm_payee_for_dedupe(p):
     if not isinstance(p, str):
@@ -39,12 +40,13 @@ def norm_payee_for_dedupe(p):
     p = normalize_payee(p)
     return " ".join(p.upper().split())
 
+
 # -------------------------------------------------------------------
 #  Main merge function
 # -------------------------------------------------------------------
 def merge_to_one_sheet_keep_dates(
-    include_subfolders: bool = False   ,
-    sheet_name        : str  = "Merged",
+    include_subfolders: bool = False,
+    sheet_name: str = "Merged",
 ):
     """
     Merge all Excel files from {root_dir}/data/raw_transactions (by default) into a single sheet:
@@ -132,12 +134,12 @@ def merge_to_one_sheet_keep_dates(
             
             # Build normalized frame
             df_norm = pd.DataFrame()
-            df_norm["date" ] = df_sheet[date_col ]
+            df_norm["date"] = df_sheet[date_col]
             df_norm["payee"] = df_sheet[payee_col]
             
             # Parse expense & currency per row
-            expenses  : List[float] = []
-            currencies: List[str  ] = []
+            expenses: List[float] = []
+            currencies: List[str] = []
             
             if currency_col:
                 cur_series = df_sheet[currency_col]
@@ -196,6 +198,22 @@ def merge_to_one_sheet_keep_dates(
             
             # Basic payee cleanup
             df_norm["payee"] = df_norm["payee"].astype(str).str.strip()
+            
+            """
+            # ---------- NEW: debug printing for BIT transfers ----------
+            bit_rows = df_norm[
+                df_norm["payee"].str.contains("BIT", case=False, na=False)
+            ]
+            if not bit_rows.empty:
+                print(f"\n[SKIPPED: BIT transfers] {f.name}:")
+                print(bit_rows[["date", "payee", "expense", "currency"]])
+            # -----------------------------------------------------------
+
+            # Drop BIT transfers
+            df_norm = df_norm[
+                ~df_norm["payee"].str.contains("BIT", case=False, na=False)
+            ].copy()
+            """
             
             # ---------------------------
             # Normalize payee via rules
@@ -261,16 +279,6 @@ def merge_to_one_sheet_keep_dates(
     # Final payee normalization
     merged["payee"] = merged["payee"].apply(normalize_payee)
     
-    # -----------------------------------------------
-    # Sort unresolved payees first ("לא מזוהה")
-    # -----------------------------------------------
-    if "לא מזוהה" in merged.columns:
-        merged = merged.sort_values(
-            by="לא מזוהה",
-            ascending=False,  # unresolved first
-            kind="stable",
-        ).reset_index(drop=True)
-        
     # Write to Excel + formatting
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         merged.to_excel(writer, sheet_name=sheet_name[:31], index=False)
@@ -298,8 +306,12 @@ def merge_to_one_sheet_keep_dates(
                 cell = ws.cell(row=row, column=expense_col_idx)
                 cell.number_format = "#,##0.00"
     
-    print(f"\nDone. Wrote {len(merged)} rows to: {output_path.resolve()}")
-    return output_path
+    # Refine categories ONLY on the first sheet of the merged workbook.
+    # (merge_statements writes a single-sheet workbook by default.)
+    try:
+        refine_workbook_categories(output_path, payee_col="payee", category_col="category")
+    except Exception as e:
+        print(f"[merge_statements] refine_workbook_categories failed: {e}")
     
     print(f"\nDone. Wrote {len(merged)} rows to: {output_path.resolve()}")
     return output_path

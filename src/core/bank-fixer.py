@@ -7,7 +7,7 @@ from openpyxl.styles import PatternFill
 import pandas as pd
 
 from bank_normalize_transactions import process_transactions
-from openai_merged_category_refiner import refine_merged_categories
+from openai_merged_category_refiner import refine_workbook_categories
 
 from common_paths import (
     TNUOT_9016,
@@ -627,20 +627,12 @@ def process_month(
     df_parsed.sort_values("amount", inplace=True)
     
     # Apply payee normalization + category lookup to Parsed sheet
-    # Add columns expected by transaction-specific payee rules (safe no-ops if unused).
     if not df_parsed.empty and "payee" in df_parsed.columns:
-        if "account" not in df_parsed.columns:
-            df_parsed["account"] = "9016"
-        # Use absolute value for matching against rule "expense" amounts (rules are typically positive)
-        df_parsed["expense"] = pd.to_numeric(df_parsed.get("amount"), errors="coerce").abs()
         df_parsed = apply_payee_rules_and_categories(
             df_parsed,
             rules_df=rules_df,
             lookup_df=lookup_df,
             payee_col="payee",
-            account_col="account",
-            date_col="date",
-            expense_col="expense",
         )
     
     # Do the same for Income sheet if it has a payee column
@@ -704,7 +696,12 @@ def process_month(
         style_mastercard_sheet(workbook)
     
     print(f"Done. Wrote {len(df_month)} rows to: {output_path.resolve()}")
-    refine_merged_categories(mm, yy)
+    # Refine categories ONLY on the first sheet (Parsed) of the workbook we just wrote.
+    # This keeps bank-fixer output behavior, but makes the refiner reusable by other pipelines.
+    try:
+        refine_workbook_categories(output_path)
+    except Exception as e:
+        print(f"[bank-fixer] refine_workbook_categories failed: {e}")
 
 
 # ---------------------------------------------------------------------------
