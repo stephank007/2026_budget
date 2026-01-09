@@ -459,6 +459,9 @@ def refine_merged_categories(
             continue
         
         # 4) LLM (with "לא מזוהה" / None fallback)
+        if "BIT" in p.upper():
+            continue
+            
         guess = llm_guess_category(p, allowed_categories)
         if guess:
             print(f'using openai LLM for: {p}')

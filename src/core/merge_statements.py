@@ -32,6 +32,8 @@ warnings.filterwarnings(
     message="Could not infer format, so each element will be parsed individually, falling back to `dateutil`.",
 )
 
+# please note that BIT is being excluded in openai_merged code
+
 
 # Build a dedupe key:
 def norm_payee_for_dedupe(p):
